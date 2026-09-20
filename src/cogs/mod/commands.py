@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -14,7 +15,6 @@ from src.utils import decorators as bot_decorators
 from src.utils import general as ug
 from src.utils.config import Config
 
-import logging
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
@@ -82,9 +82,22 @@ class ModCommands(ModHelpers):
         self,
         interaction: discord.Interaction,
         user: discord.User,
-        reason: app_commands.Range[str, 1, 400] = "No reason provided",
-        delete_message_days: app_commands.Range[int, 0, 7] = 0,
+        reason: str = "No reason provided",
+        delete_message_days: int = 0,
     ) -> None:
+        if not 1 <= len(reason) <= 400:
+            await interaction.followup.send(
+                content="Reason must be between 1 and 400 characters",
+                ephemeral=True,
+            )
+            return
+        if delete_message_days < 0 or delete_message_days > 7:
+            await interaction.followup.send(
+                content="Delete message days must be between 0 and 7",
+                ephemeral=True,
+            )
+            return
+
         # Checks that apply whether or not the user is still in the server
         if user.id == interaction.user.id:
             await interaction.followup.send(content="You can't ban yourself", ephemeral=True)
@@ -104,9 +117,7 @@ class ModCommands(ModHelpers):
                 return
 
             try:
-                await member.send(
-                    content=f"You have been banned from **{interaction.guild.name}**\nReason: {reason}"
-                )
+                await member.send(content=f"You have been banned from **{interaction.guild.name}**\nReason: {reason}")
             except (discord.Forbidden, discord.HTTPException):
                 pass
 

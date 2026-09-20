@@ -366,3 +366,144 @@ async def test_timeout_junior_mod_target_blocked(
     interaction = interaction_factory(user=mod)
     await get_callback(cmd.timeout_member)(cmd, interaction, target, "10m")
     assert interaction.followup.send.await_args.kwargs.get("ephemeral") is True
+
+
+def _ban_guild(target: MagicMock, *, owner_id: int = 999) -> MagicMock:
+    guild = MagicMock(spec=discord.Guild)
+    guild.name = "PESU"
+    guild.owner_id = owner_id
+    guild.get_member = MagicMock(return_value=target)
+    guild.ban = AsyncMock()
+    return guild
+
+
+async def test_ban_success(
+    mock_bot: MagicMock, interaction_factory: InteractionFactory, member_factory: MemberFactory
+) -> None:
+    cmd = ModCommands()
+    cmd.client = mock_bot
+    mod = member_factory(user_id=1, roles=[mock_bot.config.mod_role])
+    target = member_factory(user_id=2, roles=[])
+    guild = _ban_guild(target)
+    interaction = interaction_factory(user=mod)
+    interaction.guild = guild
+    mock_bot.config.mod_logs_channel.send = AsyncMock()
+
+    await get_callback(cmd.ban)(cmd, interaction, target, "spam", 2)
+
+    target.send.assert_awaited()
+    guild.ban.assert_awaited_once_with(
+        target,
+        reason=f"Banned by {mod} | spam",
+        delete_message_seconds=172800,
+    )
+    interaction.followup.send.assert_awaited()
+    mock_bot.config.mod_logs_channel.send.assert_awaited()
+
+
+async def test_ban_self_bot_owner_blocked(
+    mock_bot: MagicMock, interaction_factory: InteractionFactory, member_factory: MemberFactory
+) -> None:
+    cmd = ModCommands()
+    cmd.client = mock_bot
+    mod = member_factory(user_id=1, roles=[mock_bot.config.mod_role])
+    guild = _ban_guild(None, owner_id=2)
+    interaction = interaction_factory(user=mod)
+    interaction.guild = guild
+    mock_bot.user.id = 7
+
+    await get_callback(cmd.ban)(cmd, interaction, mod)
+    assert "yourself" in interaction.followup.send.await_args.kwargs["content"]
+
+    await get_callback(cmd.ban)(cmd, interaction, member_factory(user_id=7))
+    assert "myself" in interaction.followup.send.await_args.kwargs["content"]
+
+    await get_callback(cmd.ban)(cmd, interaction, member_factory(user_id=2))
+    assert "owner" in interaction.followup.send.await_args.kwargs["content"]
+
+    guild.ban.assert_not_awaited()
+
+
+async def test_ban_invalid_reason_and_days(
+    mock_bot: MagicMock, interaction_factory: InteractionFactory, member_factory: MemberFactory
+) -> None:
+    cmd = ModCommands()
+    cmd.client = mock_bot
+    mod = member_factory(user_id=1, roles=[mock_bot.config.mod_role])
+    target = member_factory(user_id=2)
+    guild = _ban_guild(target)
+    interaction = interaction_factory(user=mod)
+    interaction.guild = guild
+
+    await get_callback(cmd.ban)(cmd, interaction, target, "", 0)
+    assert "1 and 400" in interaction.followup.send.await_args.kwargs["content"]
+
+    await get_callback(cmd.ban)(cmd, interaction, target, "x" * 401, 0)
+    assert "1 and 400" in interaction.followup.send.await_args.kwargs["content"]
+
+    await get_callback(cmd.ban)(cmd, interaction, target, "spam", 8)
+    assert "0 and 7" in interaction.followup.send.await_args.kwargs["content"]
+
+    await get_callback(cmd.ban)(cmd, interaction, target, "spam", -1)
+    assert "0 and 7" in interaction.followup.send.await_args.kwargs["content"]
+
+    guild.ban.assert_not_awaited()
+
+
+async def test_ban_protected_member(
+    mock_bot: MagicMock, interaction_factory: InteractionFactory, member_factory: MemberFactory
+) -> None:
+    cmd = ModCommands()
+    cmd.client = mock_bot
+    mod = member_factory(user_id=1, roles=[mock_bot.config.mod_role])
+    target = member_factory(user_id=2, roles=[mock_bot.config.mod_role])
+    guild = _ban_guild(target)
+    interaction = interaction_factory(user=mod)
+    interaction.guild = guild
+
+    await get_callback(cmd.ban)(cmd, interaction, target)
+    assert interaction.followup.send.await_args.kwargs.get("ephemeral") is True
+    guild.ban.assert_not_awaited()
+
+
+async def test_ban_left_server_skips_dm(
+    mock_bot: MagicMock, interaction_factory: InteractionFactory, member_factory: MemberFactory
+) -> None:
+    cmd = ModCommands()
+    cmd.client = mock_bot
+    mod = member_factory(user_id=1, roles=[mock_bot.config.mod_role])
+    target = member_factory(user_id=2)
+    guild = _ban_guild(None)
+    interaction = interaction_factory(user=mod)
+    interaction.guild = guild
+    mock_bot.config.mod_logs_channel.send = AsyncMock()
+
+    await get_callback(cmd.ban)(cmd, interaction, target, "spam", 1)
+
+    target.send.assert_not_awaited()
+    guild.ban.assert_awaited_once_with(
+        target,
+        reason=f"Banned by {mod} | spam",
+        delete_message_seconds=86400,
+    )
+    interaction.followup.send.assert_awaited()
+
+
+async def test_ban_mod_log_failure_still_succeeds(
+    mock_bot: MagicMock, interaction_factory: InteractionFactory, member_factory: MemberFactory
+) -> None:
+    cmd = ModCommands()
+    cmd.client = mock_bot
+    mod = member_factory(user_id=1, roles=[mock_bot.config.mod_role])
+    target = member_factory(user_id=2, roles=[])
+    guild = _ban_guild(target)
+    interaction = interaction_factory(user=mod)
+    interaction.guild = guild
+    mock_bot.config.mod_logs_channel.send = AsyncMock(
+        side_effect=discord.HTTPException(MagicMock(), "boom"),
+    )
+
+    await get_callback(cmd.ban)(cmd, interaction, target, "spam")
+
+    guild.ban.assert_awaited()
+    interaction.followup.send.assert_awaited()

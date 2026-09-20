@@ -14,6 +14,9 @@ from src.utils import decorators as bot_decorators
 from src.utils import general as ug
 from src.utils.config import Config
 
+import logging
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
     from src.bot import DiscordBot
 
@@ -57,6 +60,74 @@ class ModCommands(ModHelpers):
         )
         await interaction.followup.send(embed=embed)
         await self.client.config.mod_logs_channel.send(embed=embed)
+
+    @ModGroups.mod.command(name="ban", description="Ban a user from the server")
+    @app_commands.describe(
+        user="The user to ban (works even if they already left the server)",
+        reason="Reason for the ban",
+        delete_message_days="Days of the user's recent messages to delete (0-7)",
+    )
+    @bot_decorators.defer(ephemeral=False)
+    @bot_decorators.requires_location(bot_decorators.CommandLocation.GUILD)
+    @bot_decorators.requires_roles(
+        bot_decorators.FunctionalRole.ADMIN,
+        bot_decorators.FunctionalRole.MOD,
+        bot_decorators.FunctionalRole.JUNIOR_MOD,
+    )
+    @bot_decorators.handle_command_errors(
+        not_found="This user doesn't even exist, who are you trying to ban?",
+        forbidden="I am unable to ban this user at this time",
+    )
+    async def ban(
+        self,
+        interaction: discord.Interaction,
+        user: discord.User,
+        reason: app_commands.Range[str, 1, 400] = "No reason provided",
+        delete_message_days: app_commands.Range[int, 0, 7] = 0,
+    ) -> None:
+        # Checks that apply whether or not the user is still in the server
+        if user.id == interaction.user.id:
+            await interaction.followup.send(content="You can't ban yourself", ephemeral=True)
+            return
+        if user.id == self.client.user.id:
+            await interaction.followup.send(content="I'm not banning myself", ephemeral=True)
+            return
+        if user.id == interaction.guild.owner_id:
+            await interaction.followup.send(content="You can't ban the server owner", ephemeral=True)
+            return
+
+        # Role-hierarchy checks only make sense for current members
+        member = interaction.guild.get_member(user.id)
+        if member is not None:
+            if (target_error := ug.mod_target_error(member, self.client.config)) is not None:
+                await interaction.followup.send(content=target_error, ephemeral=True)
+                return
+
+            try:
+                await member.send(
+                    content=f"You have been banned from **{interaction.guild.name}**\nReason: {reason}"
+                )
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+
+        await interaction.guild.ban(
+            user,
+            reason=f"Banned by {interaction.user} | {reason}",
+            delete_message_seconds=delete_message_days * 86400,
+        )
+
+        embed = ug.build_embed(
+            title="Member Banned",
+            color=discord.Color.red(),
+            description=f"{user.mention} was banned by {interaction.user.mention}\n**Reason:** {reason}",
+        )
+        await interaction.followup.send(embed=embed)
+
+        # The ban already succeeded, so a log-channel failure must not look like a failed ban
+        try:
+            await self.client.config.mod_logs_channel.send(embed=embed)
+        except discord.HTTPException:
+            logger.warning("Failed to send ban log for user %s", user.id, exc_info=True)
 
     @commands.hybrid_command(name="echo", aliases=["e"], description="Echoes a message to the target channel")
     @app_commands.guilds(discord.Object(id=Config.GUILD_ID))

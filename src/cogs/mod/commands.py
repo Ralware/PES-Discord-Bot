@@ -85,17 +85,7 @@ class ModCommands(ModHelpers):
         reason: str = "No reason provided",
         delete_message_days: int = 0,
     ) -> None:
-        if not 1 <= len(reason) <= 400:
-            await interaction.followup.send(
-                content="Reason must be between 1 and 400 characters",
-                ephemeral=True,
-            )
-            return
-        if delete_message_days < 0 or delete_message_days > 7:
-            await interaction.followup.send(
-                content="Delete message days must be between 0 and 7",
-                ephemeral=True,
-            )
+        if not await self._validate_ban_args(interaction, reason, delete_message_days):
             return
 
         # Checks that apply whether or not the user is still in the server
@@ -107,6 +97,20 @@ class ModCommands(ModHelpers):
             return
         if user.id == interaction.guild.owner_id:
             await interaction.followup.send(content="You can't ban the server owner", ephemeral=True)
+            return
+
+        # Read-only lookup before any mutation: a lookup failure aborts loudly, and a
+        # malformed links record fails closed (no Discord ban without a recordable PRN).
+        ban_prn, link_malformed = await self._lookup_server_ban_prn(user)
+        if link_malformed:
+            await interaction.followup.send(
+                content=(
+                    f"Ban NOT performed: {user.mention} has a malformed link record, so no PRN "
+                    "identity ban could be established. Repair the `links` record before banning. "
+                    "The member remains unbanned."
+                ),
+                ephemeral=True,
+            )
             return
 
         # Role-hierarchy checks only make sense for current members
@@ -121,16 +125,19 @@ class ModCommands(ModHelpers):
             except (discord.Forbidden, discord.HTTPException):
                 pass
 
-        await interaction.guild.ban(
-            user,
-            reason=f"Banned by {interaction.user} | {reason}",
-            delete_message_seconds=delete_message_days * 86400,
-        )
+        # A reconciler cannot interleave this Discord + identity state transition.
+        outcome, identity_prn = await self._ban_with_identity(interaction, user, ban_prn, reason, delete_message_days)
 
         embed = ug.build_embed(
             title="Member Banned",
             color=discord.Color.red(),
-            description=f"{user.mention} was banned by {interaction.user.mention}\n**Reason:** {reason}",
+            description=self._ban_result_description(
+                user_mention=user.mention,
+                moderator_mention=interaction.user.mention,
+                reason=reason,
+                outcome=outcome,
+                identity_prn=identity_prn,
+            ),
         )
         await interaction.followup.send(embed=embed)
 
@@ -139,6 +146,68 @@ class ModCommands(ModHelpers):
             await self.client.config.mod_logs_channel.send(embed=embed)
         except discord.HTTPException:
             logger.warning("Failed to send ban log for user %s", user.id, exc_info=True)
+
+    @ModGroups.mod.command(name="unban", description="Unban a user from the server")
+    @app_commands.describe(user="The user to unban", reason="Reason for the unban")
+    @bot_decorators.defer(ephemeral=False)
+    @bot_decorators.requires_location(bot_decorators.CommandLocation.GUILD)
+    @bot_decorators.requires_roles(
+        bot_decorators.FunctionalRole.ADMIN,
+        bot_decorators.FunctionalRole.MOD,
+        bot_decorators.FunctionalRole.JUNIOR_MOD,
+    )
+    @bot_decorators.handle_command_errors(
+        not_found="This user doesn't even exist, who are you trying to unban?",
+        forbidden="I am unable to unban this user at this time",
+    )
+    async def unban(
+        self,
+        interaction: discord.Interaction,
+        user: discord.User,
+        reason: str = "No reason provided",
+    ) -> None:
+        if not 1 <= len(reason) <= 400:
+            await interaction.followup.send(
+                content="Reason must be between 1 and 400 characters",
+                ephemeral=True,
+            )
+            return
+
+        # Checks that apply whether or not the user is still in the server
+        if user.id == interaction.user.id:
+            await interaction.followup.send(content="You can't unban yourself", ephemeral=True)
+            return
+        if user.id == self.client.user.id:
+            await interaction.followup.send(content="I'm not unbanning myself", ephemeral=True)
+            return
+        if user.id == interaction.guild.owner_id:
+            await interaction.followup.send(content="You can't unban the server owner", ephemeral=True)
+            return
+
+        discord_banned, outcome, identity_prn, link_malformed = await self._unban_with_identity(
+            interaction, user, reason
+        )
+
+        embed = ug.build_embed(
+            title="Member Unbanned",
+            color=discord.Color.green(),
+            description=self._unban_result_description(
+                user_mention=user.mention,
+                moderator_mention=interaction.user.mention,
+                reason=reason,
+                discord_unbanned=discord_banned,
+                outcome=outcome,
+                identity_prn=identity_prn,
+                link_malformed=link_malformed,
+            ),
+        )
+        await interaction.followup.send(embed=embed)
+
+        # The unban already succeeded, so a log-channel failure must not look like a failed unban
+        try:
+            await self.client.config.mod_logs_channel.send(embed=embed)
+        except discord.HTTPException:
+            logger.warning("Failed to send unban log for user %s", user.id, exc_info=True)
 
     @commands.hybrid_command(name="echo", aliases=["e"], description="Echoes a message to the target channel")
     @app_commands.guilds(discord.Object(id=Config.GUILD_ID))

@@ -408,9 +408,10 @@ async def test_ban_success(
     mock_bot.stores.server_bans.insert_one = AsyncMock()
     mock_bot.config.mod_logs_channel.send = AsyncMock()
 
-    await get_callback(cmd.ban)(cmd, interaction, target, "spam", 2)
+    with patch("src.cogs.mod.commands.ug.send_dm_safely", AsyncMock(return_value=True)) as send_dm_safely:
+        await get_callback(cmd.ban)(cmd, interaction, target, "spam", 2)
 
-    target.send.assert_awaited()
+    send_dm_safely.assert_awaited_once_with(target, content="You have been banned from **PESU**\nReason: spam")
     guild.ban.assert_awaited_once_with(
         target,
         reason=f"Banned by {mod} | spam",
@@ -422,25 +423,26 @@ async def test_ban_success(
     mock_bot.config.mod_logs_channel.send.assert_awaited()
 
 
-async def test_ban_self_bot_owner_blocked(
+async def test_ban_self_and_bot_targets_blocked(
     mock_bot: MagicMock, interaction_factory: InteractionFactory, member_factory: MemberFactory
 ) -> None:
     cmd = ModCommands()
     cmd.client = mock_bot
     mod = member_factory(user_id=1, roles=[mock_bot.config.mod_role])
-    guild = _ban_guild(None, owner_id=2)
+    guild = _ban_guild(None)
     interaction = interaction_factory(user=mod)
     interaction.guild = guild
-    mock_bot.user.id = 7
-
     await get_callback(cmd.ban)(cmd, interaction, mod)
     assert "yourself" in interaction.followup.send.await_args.kwargs["content"]
 
-    await get_callback(cmd.ban)(cmd, interaction, member_factory(user_id=7))
-    assert "myself" in interaction.followup.send.await_args.kwargs["content"]
+    this_bot = member_factory(user_id=7, bot=True)
+    mock_bot.user.id = this_bot.id
+    await get_callback(cmd.ban)(cmd, interaction, this_bot)
+    assert interaction.followup.send.await_args.kwargs["content"] == "Nope, not doing that again."
 
-    await get_callback(cmd.ban)(cmd, interaction, member_factory(user_id=2))
-    assert "owner" in interaction.followup.send.await_args.kwargs["content"]
+    another_bot = member_factory(user_id=8, bot=True)
+    await get_callback(cmd.ban)(cmd, interaction, another_bot)
+    assert interaction.followup.send.await_args.kwargs["content"] == "Nope, not doing that again."
 
     guild.ban.assert_not_awaited()
 
@@ -615,15 +617,16 @@ async def test_ban_dm_closed_still_bans(
     cmd.client = mock_bot
     mod = member_factory(user_id=1, roles=[mock_bot.config.mod_role])
     target = member_factory(user_id=2, roles=[])
-    target.send = AsyncMock(side_effect=discord.Forbidden(MagicMock(), "closed"))
     guild = _ban_guild(target)
     interaction = interaction_factory(user=mod)
     interaction.guild = guild
     mock_bot.stores.links.find_one = AsyncMock(return_value=None)
     mock_bot.config.mod_logs_channel.send = AsyncMock()
 
-    await get_callback(cmd.ban)(cmd, interaction, target, "spam")
+    with patch("src.cogs.mod.commands.ug.send_dm_safely", AsyncMock(return_value=False)) as send_dm_safely:
+        await get_callback(cmd.ban)(cmd, interaction, target, "spam")
 
+    send_dm_safely.assert_awaited_once_with(target, content="You have been banned from **PESU**\nReason: spam")
     guild.ban.assert_awaited()
     interaction.followup.send.assert_awaited()
 

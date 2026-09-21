@@ -47,10 +47,10 @@ class ModCommands(ModHelpers):
             await interaction.followup.send(content=target_error, ephemeral=True)
             return
 
-        try:
-            await member.send(content=f"You have been kicked from **{interaction.guild.name}**\nReason: {reason}")
-        except (discord.Forbidden, discord.HTTPException):
-            pass
+        await ug.send_dm_safely(
+            member,
+            content=f"You have been kicked from **{interaction.guild.name}**\nReason: {reason}",
+        )
 
         await member.kick(reason=f"Kicked by {interaction.user} | {reason}")
         embed = ug.build_embed(
@@ -92,11 +92,8 @@ class ModCommands(ModHelpers):
         if user.id == interaction.user.id:
             await interaction.followup.send(content="You can't ban yourself", ephemeral=True)
             return
-        if user.id == self.client.user.id:
-            await interaction.followup.send(content="I'm not banning myself", ephemeral=True)
-            return
-        if user.id == interaction.guild.owner_id:
-            await interaction.followup.send(content="You can't ban the server owner", ephemeral=True)
+        if user.bot:
+            await interaction.followup.send(content="Nope, not doing that again.", ephemeral=True)
             return
 
         # Read-only lookup before any mutation: a lookup failure aborts loudly, and a
@@ -120,10 +117,10 @@ class ModCommands(ModHelpers):
                 await interaction.followup.send(content=target_error, ephemeral=True)
                 return
 
-            try:
-                await member.send(content=f"You have been banned from **{interaction.guild.name}**\nReason: {reason}")
-            except (discord.Forbidden, discord.HTTPException):
-                pass
+            await ug.send_dm_safely(
+                member,
+                content=f"You have been banned from **{interaction.guild.name}**\nReason: {reason}",
+            )
 
         # A reconciler cannot interleave this Discord + identity state transition.
         outcome, identity_prn = await self._ban_with_identity(interaction, user, ban_prn, reason, delete_message_days)
